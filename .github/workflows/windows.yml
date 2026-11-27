@@ -1,0 +1,35 @@
+name: Build and verify Windows download
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build from reviewed source
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cl /nologo /O2 /W4 /D_WIN32_WINNT=0x0A00 legion.c /link /SUBSYSTEM:WINDOWS /OUT:LegionLock.exe user32.lib gdi32.lib advapi32.lib xinput.lib
+      - name: Verify with Microsoft Defender
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Update-MpSignature
+          $status = Get-MpComputerStatus
+          $status | Select AntivirusEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated | Format-List
+          if (!$status.AntivirusEnabled -or $status.AntivirusSignatureAge -gt 2) { throw 'Current Defender protection required' }
+          $scanner = Get-ChildItem "$env:ProgramData\Microsoft\Windows Defender\Platform\*\MpCmdRun.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $exe = (Resolve-Path LegionLock.exe).Path
+          Compress-Archive $exe LegionLock-Windows-x64.zip
+          foreach ($file in @($exe,(Resolve-Path LegionLock-Windows-x64.zip).Path)) {
+            $before = (Get-FileHash $file).Hash
+            & $scanner.FullName -Scan -ScanType 3 -File $file -DisableRemediation
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash $file).Hash -ne $before) { throw "Scan failed: $file" }
+            Write-Host "$before  $file"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Verified-LegionLock
+          path: LegionLock-Windows-x64.zip
